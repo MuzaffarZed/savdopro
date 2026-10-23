@@ -7,6 +7,7 @@
 import { supabase } from "@/integrations/supabase/client";
 import { fmtMoney, fmtDate } from "./format";
 import QRCode from "qrcode";
+import { getLocalCustomers } from "./offline-store";
 
 // ======================= MODELLAR VA TURLAR =======================
 
@@ -87,6 +88,7 @@ export interface PaymentReceiptPayload {
 const TG_SETTINGS_STORAGE_KEY = "savdopro_telegram_settings_v2";
 const TG_LINKS_STORAGE_KEY = "savdopro_customer_telegram_links_v2";
 const TG_MESSAGES_STORAGE_KEY = "savdopro_telegram_messages_outbox_v2";
+const TG_LAST_UPDATE_ID_KEY = "savdopro_telegram_last_update_id_v2";
 
 export const DEFAULT_TELEGRAM_SETTINGS: TelegramBotSettings = {
   botToken: "",
@@ -161,6 +163,23 @@ export function saveLocalOutbox(messages: TelegramOutboxMessage[]): void {
   } catch {}
 }
 
+function getLastUpdateId(): number {
+  if (typeof window === "undefined") return 0;
+  try {
+    const v = localStorage.getItem(TG_LAST_UPDATE_ID_KEY);
+    return v ? parseInt(v, 10) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function setLastUpdateId(id: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(TG_LAST_UPDATE_ID_KEY, String(id));
+  } catch {}
+}
+
 // ======================= SHA-256 VA TOKEN XAVFSIZLIGI =======================
 
 export async function computeSha256(str: string): Promise<string> {
@@ -171,7 +190,6 @@ export async function computeSha256(str: string): Promise<string> {
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
   }
-  // Oddiy fallback
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
     hash = (hash << 5) - hash + str.charCodeAt(i);
@@ -228,7 +246,7 @@ export async function createCustomerDeepLink(
   };
   saveLocalLinks(local);
 
-  // Supabase saqlashga urinish (agar jadval bo'lsa)
+  // Supabase saqlashga urinish
   try {
     await supabase.from("customer_telegram_links" as never).upsert({
       customer_id: customerId,
@@ -238,7 +256,7 @@ export async function createCustomerDeepLink(
       updated_at: new Date().toISOString(),
     } as never);
   } catch {
-    // remote table mavjud bo'lmasa xato bermaydi
+    // remote table mavjud bo'lmasa lokalda qoladi
   }
 
   const deepLink = `https://t.me/${rawBotUser}?start=link_${rawToken}`;
@@ -337,6 +355,19 @@ export async function disconnectCustomerTelegram(customerId: string): Promise<bo
 }
 
 /**
+ * Chat ID bo'yicha bog'langan mijoz ID sini topish
+ */
+export function getCustomerByTelegramChatId(chatId: number): CustomerTelegramLink | null {
+  const local = loadLocalLinks();
+  for (const link of Object.values(local)) {
+    if (link.telegramChatId === chatId && link.linkStatus === "linked") {
+      return link;
+    }
+  }
+  return null;
+}
+
+/**
  * Bot tomondan tokenni tekshirish va Chat ID ni bog'lash
  */
 export async function verifyAndBindCustomerTelegram(
@@ -347,9 +378,9 @@ export async function verifyAndBindCustomerTelegram(
   const tokenHash = await computeSha256(rawToken);
   const now = new Date();
 
-  // 1. Bir Telegram hisobini boshqa mijozga noqonuniy ulanishidan himoya (Unique Constraint)
+  // 1. Bir Telegram hisobini boshqa mijozga noqonuniy ulanishidan himoya
   const local = loadLocalLinks();
-  for (const [cid, link] of Object.entries(local)) {
+  for (const [, link] of Object.entries(local)) {
     if (link.telegramChatId === chatId && link.linkStatus === "linked" && link.tokenHash !== tokenHash) {
       return {
         ok: false,
@@ -381,7 +412,7 @@ export async function verifyAndBindCustomerTelegram(
     telegramUsername: username || null,
     linkStatus: "linked",
     linkedAt: now.toISOString(),
-    tokenHash: null, // Bir martalik qilib o'chiriladi
+    tokenHash: null,
     tokenExpiresAt: null,
     updatedAt: now.toISOString(),
   };
@@ -400,10 +431,27 @@ export async function verifyAndBindCustomerTelegram(
     } as never);
   } catch {}
 
+  // SavdoPro tizimida ochiq oynalarga darhol xabar tarqatish (Zero-Lag UI update)
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("savdopro_telegram_link_success", {
+        detail: { customerId: targetCustomerId, chatId, username },
+      })
+    );
+  }
+
   return { ok: true, customerId: targetCustomerId };
 }
 
 // ======================= EXACT SHABLON FORMATTERLAR (UZBEK UZS) =======================
+
+export function escapeTelegramHtml(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 /**
  * 4-QISM: SAVDODAN KEYINGI XABAR SHABLONI (100% spetsifikatsiya talabiga mos)
@@ -688,4 +736,234 @@ export async function resendTelegramMessage(
 
     return { ok: false, error: sendRes.error };
   }
+}
+
+// ==============================================================================
+// TELEGRAM BOT LONG-POLLING VA AVTOMATIK JAVOB BERISH MOTOR (ZERO-LAG BOT ENGINE)
+// ==============================================================================
+
+let isPollingActive = false;
+
+/**
+ * Telegram Bot yangilanishlarini (getUpdates) so'rab olish va avtomatik javob berish
+ */
+export async function pollTelegramBotUpdates(): Promise<{
+  processed: number;
+  boundCustomerIds: string[];
+}> {
+  const settings = loadTelegramSettings();
+  if (!settings.botToken) {
+    return { processed: 0, boundCustomerIds: [] };
+  }
+
+  if (isPollingActive) {
+    return { processed: 0, boundCustomerIds: [] };
+  }
+
+  isPollingActive = true;
+  const boundCustomerIds: string[] = [];
+  let processedCount = 0;
+
+  try {
+    const lastUpdateId = getLastUpdateId();
+    const offset = lastUpdateId > 0 ? lastUpdateId + 1 : 0;
+    const url = `https://api.telegram.org/bot${settings.botToken.trim()}/getUpdates?offset=${offset}&limit=20&timeout=1`;
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      isPollingActive = false;
+      return { processed: 0, boundCustomerIds: [] };
+    }
+
+    const data = await res.json();
+    if (!data.ok || !Array.isArray(data.result)) {
+      isPollingActive = false;
+      return { processed: 0, boundCustomerIds: [] };
+    }
+
+    const updates = data.result as Array<{
+      update_id: number;
+      message?: {
+        message_id: number;
+        chat: { id: number; username?: string; first_name?: string; last_name?: string };
+        from?: { id: number; username?: string; first_name?: string };
+        text?: string;
+        date: number;
+      };
+    }>;
+
+    let maxUpdateId = lastUpdateId;
+
+    for (const update of updates) {
+      if (update.update_id > maxUpdateId) {
+        maxUpdateId = update.update_id;
+      }
+
+      const msg = update.message;
+      if (!msg || !msg.text) continue;
+
+      const chatId = msg.chat.id;
+      const text = msg.text.trim();
+      const username = msg.from?.username || msg.chat.username || "";
+      const senderName = msg.from?.first_name || msg.chat.first_name || "Mijoz";
+      processedCount++;
+
+      // 1-HOLAT: /start link_<RAW_TOKEN> (QR-kod yoki havola orqali mijozni bog'lash)
+      if (text.startsWith("/start link_")) {
+        const rawToken = text.replace("/start link_", "").trim();
+        if (rawToken) {
+          const bindRes = await verifyAndBindCustomerTelegram(rawToken, chatId, username);
+          if (bindRes.ok && bindRes.customerId) {
+            boundCustomerIds.push(bindRes.customerId);
+
+            // Mijoz nomini aniqlash
+            let customerName = senderName;
+            try {
+              const localCusts = await getLocalCustomers();
+              const custObj = localCusts?.find((c) => c.id === bindRes.customerId);
+              if (custObj?.name) customerName = custObj.name;
+            } catch {}
+
+            const welcomeReply = [
+              `✅ Assalomu alaykum, hurmatli ${customerName}!`,
+              ``,
+              `Sizning Telegram hisobingiz ${settings.businessName || "SavdoPro"} tizimiga muvaffaqiyatli bog'landi! 🎉`,
+              ``,
+              `Endi har bir xaridingizda:`,
+              `🧾 Elektron xarid cheki`,
+              `💰 To'lov kvitansiyasi`,
+              `📊 Nasiya va qarz balansingiz`,
+              `to'g'ridan-to'g'ri ushbu botingizga avtomatik yetkaziladi.`,
+              ``,
+              `Har doim joriy qarz va hisobingizni bilish uchun /balans yoki /qarz deb yozishingiz mumkin.`,
+              ``,
+              `${settings.businessName || "SavdoPro"}`,
+              `by MuzaffarZed`,
+            ].join("\n");
+
+            await sendTelegramDirectMessage(settings.botToken, chatId, welcomeReply);
+          } else {
+            const failReply = [
+              `⚠️ Bog'lanish amalga oshmadi:`,
+              bindRes.error || "Ulanish kodi muddati o'tgan yoki topilmadi.",
+              ``,
+              `Iltimos, do'kon kassiridan yangi QR-kod yoki havola so'rang.`,
+              ``,
+              `by MuzaffarZed`,
+            ].join("\n");
+
+            await sendTelegramDirectMessage(settings.botToken, chatId, failReply);
+          }
+        }
+      }
+
+      // 2-HOLAT: /balans yoki /qarz (Mijoz o'z nasiya qarzini so'raganda)
+      else if (text === "/balans" || text === "/qarz" || text === "/hisob") {
+        const link = getCustomerByTelegramChatId(chatId);
+        if (link && link.customerId) {
+          let customerName = senderName;
+          let balance = 0;
+          try {
+            const localCusts = await getLocalCustomers();
+            const custObj = localCusts?.find((c) => c.id === link.customerId);
+            if (custObj) {
+              customerName = custObj.name;
+              balance = Number(custObj.balance || 0);
+            } else {
+              const { data } = await supabase
+                .from("customers")
+                .select("name, balance")
+                .eq("id", link.customerId)
+                .maybeSingle();
+              if (data) {
+                customerName = (data as { name: string }).name;
+                balance = Number((data as { balance: number }).balance || 0);
+              }
+            }
+          } catch {}
+
+          const debtStatusMsg = [
+            `📊 SAVDOPRO — SHAXSIY HISOB-KITOB`,
+            ``,
+            `Hurmatli ${customerName}!`,
+            ``,
+            `💰 Joriy umumiy qarzingiz: ${fmtMoney(balance)} so‘m`,
+            balance <= 0
+              ? `🟢 Sizda qarzdorlik mavjud emas. To'lovlaringiz uchun rahmat!`
+              : `🔴 Iltimos, qarzingizni o'z vaqtida so'ndirishni unutmang.`,
+            ``,
+            `Savollar yoki to'lov bo'yicha do'kon ma'muriyatiga murojaat qiling.`,
+            `${settings.businessName || "SavdoPro"}`,
+            `by MuzaffarZed`,
+          ].join("\n");
+
+          await sendTelegramDirectMessage(settings.botToken, chatId, debtStatusMsg);
+        } else {
+          const notLinkedReply = [
+            `Assalomu alaykum!`,
+            `Sizning Telegram hisobingiz hali SavdoPro do'kon tizimiga ulanmagan.`,
+            ``,
+            `Hisobingizni ulash uchun do'kon kassasida ko'rsatilgan QR-kodni skanerlang yoki sotuvchidan havola oling.`,
+            ``,
+            `by MuzaffarZed`,
+          ].join("\n");
+
+          await sendTelegramDirectMessage(settings.botToken, chatId, notLinkedReply);
+        }
+      }
+
+      // 3-HOLAT: /start (oddiy parametr bo'lmaganda)
+      else if (text === "/start" || text === "/help" || text === "/yordam") {
+        const link = getCustomerByTelegramChatId(chatId);
+        const welcomeText = [
+          `👋 Assalomu alaykum, ${senderName}!`,
+          ``,
+          `${settings.businessName || "SavdoPro"} rasmiy xaridlar va elektron cheklar botiga xush kelibsiz!`,
+          ``,
+          link && link.linkStatus === "linked"
+            ? `✅ Sizning hisobingiz do'kon tizimiga ulangan.\nBuyruqlar:\n/balans — Joriy qarzingiz va hisob-kitobingizni ko'rish\n/qarz — Qarz qoldig'i haqida ma'lumot`
+            : `ℹ️ Siz hali birorta do'kon mijoziga bog'lanmagansiz. Kassir sizga ko'rsatgan QR-kodni skanerlab hisobingizni ulab oling.`,
+          ``,
+          `by MuzaffarZed`,
+        ].join("\n");
+
+        await sendTelegramDirectMessage(settings.botToken, chatId, welcomeText);
+      }
+    }
+
+    if (maxUpdateId > lastUpdateId) {
+      setLastUpdateId(maxUpdateId);
+    }
+  } catch (err) {
+    console.warn("Telegram poll updates error:", err);
+  } finally {
+    isPollingActive = false;
+  }
+
+  return { processed: processedCount, boundCustomerIds };
+}
+
+/**
+ * Avtomatik fon pollingini boshqarish hook / funksiyasi
+ */
+export function startTelegramBotAutoPolling(intervalMs: number = 3000): () => void {
+  let timer: any = null;
+  let stopped = false;
+
+  const loop = async () => {
+    if (stopped) return;
+    try {
+      await pollTelegramBotUpdates();
+    } catch {}
+    if (!stopped) {
+      timer = setTimeout(loop, intervalMs);
+    }
+  };
+
+  void loop();
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
 }

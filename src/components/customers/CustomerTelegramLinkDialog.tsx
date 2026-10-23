@@ -15,16 +15,17 @@ import {
   Check,
   Unlink,
   RefreshCw,
-  ExternalLink,
   ShieldCheck,
   AlertCircle,
   Loader2,
+  Radio,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   createCustomerDeepLink,
   getCustomerTelegramLink,
   disconnectCustomerTelegram,
+  pollTelegramBotUpdates,
   type CustomerTelegramLink,
   type GeneratedDeepLinkResult,
   loadTelegramSettings,
@@ -65,7 +66,7 @@ export const CustomerTelegramLinkDialog: React.FC<CustomerTelegramLinkDialogProp
       } else {
         setGenerated(null);
       }
-    } catch (err: unknown) {
+    } catch {
       toast.error("Ma'lumotlarni yuklashda xatolik");
     } finally {
       setLoading(false);
@@ -81,6 +82,44 @@ export const CustomerTelegramLinkDialog: React.FC<CustomerTelegramLinkDialogProp
       setCopied(false);
     }
   }, [open, customer?.id]);
+
+  // Real-time Telegram Bot Polling: Mijoz QR kodni skaner qilganda avtomatik sezish
+  useEffect(() => {
+    if (!open || !customer?.id) return;
+
+    let stopped = false;
+    const interval = setInterval(async () => {
+      if (stopped) return;
+      try {
+        const res = await pollTelegramBotUpdates();
+        if (res.boundCustomerIds.includes(customer.id)) {
+          const fresh = await getCustomerTelegramLink(customer.id);
+          setLinkInfo(fresh);
+          toast.success("🎉 Mijozning Telegram hisobi muvaffaqiyatli bog'landi!");
+          onLinkUpdated?.();
+        }
+      } catch {}
+    }, 2000);
+
+    const handleSuccess = (e: Event) => {
+      const customEvt = e as CustomEvent<{ customerId: string }>;
+      if (customEvt.detail?.customerId === customer.id) {
+        void getCustomerTelegramLink(customer.id).then((fresh) => {
+          setLinkInfo(fresh);
+          toast.success("🎉 Mijozning Telegram hisobi muvaffaqiyatli bog'landi!");
+          onLinkUpdated?.();
+        });
+      }
+    };
+
+    window.addEventListener("savdopro_telegram_link_success", handleSuccess);
+
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+      window.removeEventListener("savdopro_telegram_link_success", handleSuccess);
+    };
+  }, [open, customer?.id, onLinkUpdated]);
 
   const handleCopy = () => {
     if (!generated?.deepLink) return;
@@ -189,6 +228,12 @@ export const CustomerTelegramLinkDialog: React.FC<CustomerTelegramLinkDialogProp
                   <div className="font-mono font-semibold text-foreground">{linkInfo?.telegramChatId || "—"}</div>
                 </div>
                 <div>
+                  <span className="text-muted-foreground">Telegram User:</span>
+                  <div className="font-mono font-semibold text-sky-400">
+                    {linkInfo?.telegramUsername ? `@${linkInfo.telegramUsername}` : "Mijoz lichkasi"}
+                  </div>
+                </div>
+                <div className="col-span-2 pt-1">
                   <span className="text-muted-foreground">Bog'langan sana:</span>
                   <div className="font-semibold text-foreground">
                     {linkInfo?.linkedAt ? fmtDate(new Date(linkInfo.linkedAt)) : "Muvaffaqiyatli"}
@@ -229,9 +274,9 @@ export const CustomerTelegramLinkDialog: React.FC<CustomerTelegramLinkDialogProp
                     className="w-48 h-48 object-contain"
                   />
                 </div>
-                <div className="mt-2 text-center text-[11px] text-muted-foreground flex items-center gap-1.5">
-                  <QrCode className="h-3.5 w-3.5 text-sky-400" />
-                  Mijoz ushbu QR-kodni telefon kamerasida skanerlasa yetarli
+                <div className="mt-2.5 text-center text-[11px] text-muted-foreground flex items-center gap-1.5 font-medium">
+                  <Radio className="h-3 w-3 text-emerald-400 animate-pulse" />
+                  <span>Jonli skaner kutilmoqda: mijoz botda <b>Start</b> bosishi bilan o'zi ulanadi</span>
                 </div>
               </div>
             )}
@@ -255,7 +300,7 @@ export const CustomerTelegramLinkDialog: React.FC<CustomerTelegramLinkDialogProp
             {/* Ulashish tugmalari */}
             <div className="flex items-center gap-2 pt-1">
               <Button
-                className="flex-1 h-9 text-xs bg-sky-500 hover:bg-sky-600 text-white font-medium"
+                className="flex-1 h-9 text-xs bg-sky-500 hover:bg-sky-600 text-white font-medium shadow-sm hover:shadow"
                 onClick={handleShareTelegram}
               >
                 <Send className="h-3.5 w-3.5 mr-1.5" />
@@ -275,14 +320,14 @@ export const CustomerTelegramLinkDialog: React.FC<CustomerTelegramLinkDialogProp
             <div className="rounded-lg bg-muted/30 border border-border/50 p-2.5 text-[10px] text-muted-foreground flex items-start gap-2">
               <AlertCircle className="h-3.5 w-3.5 text-sky-400 shrink-0 mt-0.5" />
               <div className="leading-relaxed">
-                Ushbu havola 24 soat davomida faol. Mijoz botni ochib <b>/start</b> bosishi bilan uning profili xavfsiz bog'lanadi va token avtomatik bekor qilinadi.
+                Ushbu havola 24 soat davomida faol. Mijoz botni ochib <b>/start</b> bosishi bilan uning profili avtomatik bog'lanadi va token bir martalik qilib bekor qilinadi.
               </div>
             </div>
           </div>
         )}
 
         <div className="pt-2 border-t border-border/40 text-[10px] text-muted-foreground/40 text-center font-mono">
-          Dasturchi: MuzaffarZed · SavdoPro Telegram Engine v2.0
+          Dasturchi: MuzaffarZed · SavdoPro Telegram Engine v2.1
         </div>
       </DialogContent>
     </Dialog>

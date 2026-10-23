@@ -48,18 +48,37 @@ import { printReceipt } from "@/lib/receipt";
 import { useActiveShift } from "@/lib/use-active-shift";
 import { usePricelist } from "@/lib/use-pricelist";
 import { cn } from "@/lib/utils";
-import { smartSearchMatch, toCyrillic, toLatin, matchPhone } from "@/lib/search-utils";
+import { smartSearchMatch, createSearchMatcher, toCyrillic, toLatin, matchPhone } from "@/lib/search-utils";
 
 export const Route = createFileRoute("/_app/pos")({ component: POSPage });
 
-export const isQopProduct = (name: string, category?: string | null) => {
+const QOP_KEYWORDS_LATIN = [
+  "parashok", "aprel", "avtomat", "nixol", "un", "shakar", "guruch", "yem", "kombikorm", "sement", "gips", "makaron", "chigit"
+];
+const QOP_KEYWORDS_CYRILLIC = [
+  "парашок", "апрель", "автомат", "нихол", "ун", "шакар", "гуруч", "ем", "комбикорм", "цемент", "гипс", "макарон", "чигит"
+];
+
+export const isQopProduct = (name: string, category?: string | null): boolean => {
   const n = (name || "").toLowerCase();
   const c = (category || "").toLowerCase();
-  return c.includes("parashok") || n.includes("parashok") || n.includes("aprel") || n.includes("avtomat") || n.includes("nixol");
+  const nLat = toLatin(n);
+  const cLat = toLatin(c);
+
+  for (const kw of QOP_KEYWORDS_LATIN) {
+    if (nLat.includes(kw) || cLat.includes(kw)) return true;
+  }
+  for (const kw of QOP_KEYWORDS_CYRILLIC) {
+    if (n.includes(kw) || c.includes(kw)) return true;
+  }
+  return false;
 };
 
-export const getProductUnit = (name: string, category?: string | null) => {
+export const getProductUnit = (name: string, category?: string | null): string => {
   if (isQopProduct(name, category)) return "qop";
+  const n = (name || "").toLowerCase();
+  if (n.includes("kg") || n.includes("кг") || n.includes("kilo") || n.includes("кило")) return "kg";
+  if (n.includes("litr") || n.includes("литр") || n.includes("1.5l") || n.includes("0.5l") || n.includes("л")) return "litr";
   return "dona";
 };
 
@@ -199,15 +218,16 @@ function POSPage() {
     },
   });
 
-  // Aqlli ikki alifboli (Lotin/Kirill) va shtrix-kodli qidiruv
+  // Aqlli ikki alifboli (Lotin/Kirill) va shtrix-kodli yuqori tezlikdagi qidiruv
   const filtered = useMemo(() => {
     if (!stock) return [];
     const q = search.trim();
     if (!q) return stock;
+    const matcher = createSearchMatcher(q);
     return stock.filter((s) =>
-      smartSearchMatch(s.name, q) ||
+      matcher(s.name) ||
       (s.barcode && s.barcode.includes(q)) ||
-      (s.category && smartSearchMatch(s.category, q))
+      (s.category && matcher(s.category))
     );
   }, [stock, search]);
 

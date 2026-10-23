@@ -4,6 +4,7 @@ import { AuthProvider } from "@/lib/auth-context";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { PwaInstallPrompt } from "@/components/pwa-prompt";
+import { TelegramBotSyncListener } from "@/components/layout/TelegramBotSyncListener";
 import { useState } from "react";
 
 function NotFoundComponent() {
@@ -89,6 +90,7 @@ function RootComponent() {
     <QueryClientProvider client={qc}>
       <AuthProvider>
         <Outlet />
+        <TelegramBotSyncListener />
         <PwaInstallPrompt />
         <Toaster richColors theme="dark" position="top-right" />
       </AuthProvider>

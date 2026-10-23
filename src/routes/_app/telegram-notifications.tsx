@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { fmtDate, fmtMoney } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import {
   loadTelegramSettings,
   saveTelegramSettings,
@@ -55,6 +56,7 @@ import {
   formatPaymentReceiptMessage,
   getCustomerTelegramLink,
   disconnectCustomerTelegram,
+  pollTelegramBotUpdates,
   type TelegramBotSettings,
   type TelegramOutboxMessage,
   type CustomerTelegramLink,
@@ -87,6 +89,25 @@ function TelegramNotificationsPage() {
   // Test message state
   const [testChatId, setTestChatId] = useState("");
   const [testSending, setTestSending] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const handleSyncUpdates = async () => {
+    setSyncing(true);
+    try {
+      const res = await pollTelegramBotUpdates();
+      if (res.processed > 0 || res.boundCustomerIds.length > 0) {
+        toast.success(`Sinxronlandi: ${res.processed} ta yangi buyruq, ${res.boundCustomerIds.length} ta yangi ulangan mijoz.`);
+      } else {
+        toast.success("Bot faol. Hozircha yangi buyruqlar yo'q.");
+      }
+      setOutboxList(loadLocalOutbox());
+      qc.invalidateQueries({ queryKey: ["customers-telegram-list"] });
+    } catch {
+      toast.error("Sinxronlashda xatolik yuz berdi");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   // Load customers
   const { data: customers = [] } = useQuery({
@@ -258,6 +279,18 @@ function TelegramNotificationsPage() {
       <PageHeader
         title="Telegram xabarnomalari"
         description="Mijozlar bilan avtomatik xarid cheklari, qarz hisob-kitoblari va shaxsiy bot boshqaruvi"
+        action={
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs gap-1.5 border-sky-500/30 text-sky-400 hover:bg-sky-500/10 shadow-sm"
+            onClick={handleSyncUpdates}
+            disabled={syncing}
+          >
+            <RotateCw className={cn("h-3.5 w-3.5", syncing && "animate-spin")} />
+            {syncing ? "Sinxronlanmoqda..." : "Botni sinxronlash"}
+          </Button>
+        }
       />
 
       {/* 4 ta Asosiy KPI Kartasi */}
