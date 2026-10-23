@@ -85,6 +85,7 @@ import {
   type QueuedDebtPayment,
 } from "@/lib/offline-store";
 import { printDebtPaymentReceipt, printAktSverka } from "@/lib/receipt";
+import { smartSearchMatch, matchPhone } from "@/lib/search-utils";
 const LocationPicker = lazy(() =>
   import("@/components/LocationPicker").then((m) => ({ default: m.LocationPicker })),
 );
@@ -756,7 +757,7 @@ function CustomersPage() {
   };
 
   const filtered = (customers ?? []).filter(
-    (c) => c.name.toLowerCase().includes(search.toLowerCase()) || (c.phone ?? "").includes(search),
+    (c) => smartSearchMatch(c.name, search) || matchPhone(c.phone, search),
   );
 
   // Inactive customers: no purchase in the last N days

@@ -1,5 +1,6 @@
 import { createFileRoute, Navigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { smartSearchMatch } from "@/lib/search-utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/auth-context";
@@ -58,7 +59,9 @@ function ProductsPage() {
 
   if (!isSuperAdmin) return <Navigate to="/dashboard" />;
 
-  const filtered = (products ?? []).filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
+  const filtered = (products ?? []).filter(
+    (p) => smartSearchMatch(p.name, search) || (p.category && smartSearchMatch(p.category, search))
+  );
 
   return (
     <>

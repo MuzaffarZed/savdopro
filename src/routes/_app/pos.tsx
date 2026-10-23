@@ -48,6 +48,7 @@ import { printReceipt } from "@/lib/receipt";
 import { useActiveShift } from "@/lib/use-active-shift";
 import { usePricelist } from "@/lib/use-pricelist";
 import { cn } from "@/lib/utils";
+import { smartSearchMatch, toCyrillic, toLatin, matchPhone } from "@/lib/search-utils";
 
 export const Route = createFileRoute("/_app/pos")({ component: POSPage });
 
@@ -198,7 +199,17 @@ function POSPage() {
     },
   });
 
-  const filtered = useMemo(() => (stock ?? []).filter((s) => s.name.toLowerCase().includes(search.toLowerCase())), [stock, search]);
+  // Aqlli ikki alifboli (Lotin/Kirill) va shtrix-kodli qidiruv
+  const filtered = useMemo(() => {
+    if (!stock) return [];
+    const q = search.trim();
+    if (!q) return stock;
+    return stock.filter((s) =>
+      smartSearchMatch(s.name, q) ||
+      (s.barcode && s.barcode.includes(q)) ||
+      (s.category && smartSearchMatch(s.category, q))
+    );
+  }, [stock, search]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -697,7 +708,23 @@ function POSPage() {
         <div className="space-y-3">
           <div className="relative rounded-xl border border-border/60 bg-card/75 backdrop-blur-md p-1 flex items-center shadow-sm">
             <ScanBarcode className="ml-2.5 h-4 w-4 text-primary shrink-0" />
-            <Input className="border-0 bg-transparent shadow-none pl-2 pr-16 h-10 text-base sm:text-sm focus-visible:ring-0 focus-visible:ring-offset-0" placeholder="Mahsulot qidirish yoki skanerlash..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            <Input
+              className="border-0 bg-transparent shadow-none pl-2 pr-16 h-10 text-base sm:text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+              placeholder="Mahsulot nomi yoki shtrix-kod skanerlang (Lotin / Kirill)..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && filtered.length > 0) {
+                  const q = search.trim();
+                  const exact = filtered.find((p) => p.barcode === q) || filtered[0];
+                  if (exact) {
+                    addToCart(exact);
+                    toast.success(`Savatga qo'shildi: ${exact.name}`, { duration: 1500 });
+                    setSearch("");
+                  }
+                }
+              }}
+            />
             {search && (
               <button onClick={() => setSearch("")} className="mr-2 text-muted-foreground hover:text-foreground p-1" aria-label="Tozalash">
                 <X className="h-4 w-4" />
@@ -713,6 +740,27 @@ function POSPage() {
               </SelectContent>
             </Select>
           </div>
+          {/* Tez eslab qolish - Tezkor tovarlar paneli */}
+          {!search && stock && stock.length > 0 && (
+            <div className="flex items-center gap-1.5 overflow-x-auto -mx-1 px-1 py-0.5 scrollbar-none text-xs">
+              <span className="text-[11px] text-muted-foreground shrink-0 font-medium flex items-center gap-1">
+                ⚡ Tezkor:
+              </span>
+              {stock.slice(0, 6).map((item) => (
+                <button
+                  key={`quick-${item.product_id}`}
+                  onClick={() => {
+                    addToCart(item);
+                    toast.success(`+1 ${item.name}`, { duration: 1200 });
+                  }}
+                  className="shrink-0 px-2.5 py-1 rounded-lg bg-card/80 hover:bg-primary/20 border border-border/50 hover:border-primary/40 text-foreground transition-all flex items-center gap-1.5 active:scale-95 shadow-sm text-xs"
+                >
+                  <span className="truncate max-w-[110px]">{item.name}</span>
+                  <span className="text-[10px] text-primary font-mono font-semibold">{fmtMoney(item.minCost)}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {/* Category chips */}
           <div className="flex gap-1.5 overflow-x-auto -mx-1 px-1 pb-1 scrollbar-none">
             <button
@@ -1357,21 +1405,25 @@ function CustomerSearch({ customerId, setCustomerId, customers }: { customerId: 
       </PopoverTrigger>
       <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
         <Command>
-          <CommandInput placeholder="Mijoz nomi..." />
+          <CommandInput placeholder="Mijoz nomi yoki telefon raqami..." />
           <CommandList>
             <CommandEmpty>Topilmadi</CommandEmpty>
             <CommandGroup>
-              <CommandItem value="walkin yo'q" onSelect={() => { setCustomerId("walkin"); setOpen(false); }}>
+              <CommandItem value="walkin yo'q mijozsiz" onSelect={() => { setCustomerId("walkin"); setOpen(false); }}>
                 <Check className={cn("h-4 w-4", customerId === "walkin" ? "opacity-100" : "opacity-0")} />
                 — Mijoz yo'q —
               </CommandItem>
-              {customers.map((c) => (
-                <CommandItem key={c.id} value={c.name} onSelect={() => { setCustomerId(c.id); setOpen(false); }}>
-                  <Check className={cn("h-4 w-4", customerId === c.id ? "opacity-100" : "opacity-0")} />
-                  <span className="flex-1 truncate">{c.name}</span>
-                  {Number(c.balance) > 0 && <span className="ml-2 text-[11px] text-warning font-mono">{fmtMoney(c.balance)}</span>}
-                </CommandItem>
-              ))}
+              {customers.map((c) => {
+                const searchKeys = `${c.name} ${c.phone ?? ""} ${toCyrillic(c.name)} ${toLatin(c.name)}`;
+                return (
+                  <CommandItem key={c.id} value={searchKeys} onSelect={() => { setCustomerId(c.id); setOpen(false); }}>
+                    <Check className={cn("h-4 w-4", customerId === c.id ? "opacity-100" : "opacity-0")} />
+                    <span className="flex-1 truncate">{c.name}</span>
+                    {c.phone && <span className="text-xs text-muted-foreground ml-2 font-mono">{c.phone}</span>}
+                    {Number(c.balance) > 0 && <span className="ml-2 text-[11px] text-warning font-mono">{fmtMoney(c.balance)}</span>}
+                  </CommandItem>
+                );
+              })}
             </CommandGroup>
           </CommandList>
         </Command>
