@@ -1,0 +1,8 @@
+{
+  "versionCode": 4,
+  "versionName": "1.2.0",
+  "apkUrl": "https://zafaruzb.lovable.app/SavdoPro.apk",
+  "releaseNotes": "• Takomillashtirilgan SavdoPro tizimi to'liq APK ichiga joylandi\n• Parashok '1 dona = 1 qop' tizimi\n• Telegram Bot orqali xarid cheki va to'lov kvitansiyasi\n• Mijoz profilida Telegram ulanish va QR-kod\n• Tezkor 0.01 soniyalik oflayn ishga tushish",
+  "minRequiredVersion": 1,
+  "forceUpdate": false
+}

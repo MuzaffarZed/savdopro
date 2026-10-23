@@ -1,0 +1,1 @@
+DROP FUNCTION IF EXISTS public.process_sale(uuid, uuid, uuid, jsonb, numeric, public.payment_method, uuid, text);
